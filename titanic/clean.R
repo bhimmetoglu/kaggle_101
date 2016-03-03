@@ -69,6 +69,8 @@ clean.tr <- function (train, test){
     titles[i] <- str_trim(strsplit(temp, split = ",")[[1]][2], "left")
   }
   # New data frame with a column = title
+  
+  # Change to factors
   ts2 <- mutate(test, Title = as.factor(titles))
 
   #Replce NA's with median age (this comes from train)
@@ -89,6 +91,9 @@ clean.tr <- function (train, test){
   ts2 <- mutate(ts2, binaryCabin = 1)
   ts2[ts2$Cabin == "", ]$binaryCabin = 0
   ts2 <- mutate(ts2, binaryCabin = factor(binaryCabin))
+
+  # There is one Title == Dona, replace it with Don (assume equivalence)
+  levels(ts2$Title) <- c("Col", "Don", "Dr", "Master", "Miss", "Mr", "Mrs", "Ms", "Rev")
       
   # Return the data.frames tr2 and ts2
   list(tr2,ts2)
