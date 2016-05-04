@@ -1,0 +1,155 @@
+# Santander data: Stacking of models
+# Author: Burak H
+#
+library(dplyr); library(caret); library(xgboost); library(e1071)
+library(randomForest); library(nnet)
+setwd("~/Works/Rworkspace/Santender/")
+
+# Read data
+train0 <- read.csv("train.csv")
+test0 <- read.csv("test.csv")
+
+# Get the cleaned and processed data
+setwd("~/Works/Rworkspace/Santender/final/stacking.tst0/")
+fun.clean <- dget("clean_process.R")
+cleaned <- fun.clean(train0,test0)
+y <- cleaned[[1]]; train0 <- cleaned[[2]]; test0 <- cleaned[[3]]
+test0.id <- cleaned[[4]]
+rm(cleaned)
+
+# Put TARGET back into train0
+train0$TARGET <- y
+
+# Define parameters for each model
+# --- XGB --- #
+params <- list(booster="gbtree", objective = "binary:logistic",
+               max_depth = 5, eta = 2^(-5), colsample_bytree = 0.4,
+               min_child_weight = 1, gamma = 4)
+
+# --- NNET --- #
+input_layer_size = ncol(train0)-1 # Initial layer (-1 for label column)
+hidden_layer_size = 5 # hidden layer size
+output_layer_size = 2 # Number of classes
+N.weights = (input_layer_size+1)*hidden_layer_size + (hidden_layer_size+1)*output_layer_size
+decay = 2.0
+
+# --- RF --- #
+mtry = 38
+
+# Initiate 5-folds
+folds <- createFolds(train0$TARGET, k = 5, list = TRUE)
+
+# Initiate empyt vectors for predictions
+pmod1 <- array(0, dim = nrow(train0))
+pmod2 <- array(0, dim = nrow(train0))
+pmod3 <- array(0, dim = nrow(train0))
+
+# Now compute oos predictions for all models
+for (ifold in 1:5){
+  oos <- folds[[ifold]] # Indices of OOS
+  cat("Fold: ", ifold, "\n")
+  
+  # XGBoost
+  cat("Training XGBoost")
+  dbuild <- xgb.DMatrix(data = as.matrix(select(train0[-oos, ], -TARGET)),
+                        label = train0[-oos, ]$TARGET)
+  doos <- xgb.DMatrix(data = as.matrix(select(train0[oos, ], -TARGET)),
+                      label = train0[oos, ]$TARGET)
+  
+  mod.xgb <- xgboost(data = dbuild, params = params, nthread = 8, nrounds = 400,
+                     print.every.n = 10, eval_metric = "auc")
+  
+  pmod1[oos] <- predict(mod.xgb, newdata = doos)
+  
+  # NNET
+  cat("Training NNET: \n")
+  
+  mod.nnet <- nnet(TARGET ~., data = mutate(train0[-oos, ], TARGET = factor(TARGET)), 
+                   softmax = FALSE, size = hidden_layer_size, 
+                   MaxNWts = N.weights , maxit = 1000, decay = decay)
+  
+  pmod2[oos] <- predict(mod.nnet, newdata = train0[oos,])
+  
+  # RF (using the balanced data set)
+  nmin <- sum(train0[-oos,]$TARGET == "1"); nmax <- sum(train0[-oos,]$TARGET == "0")
+  temp0 <- filter(train0[-oos,], TARGET == "0")
+  temp1 <- filter(train0[-oos,], TARGET == "1")
+  tmp0 <- temp0[sample(1:nmax, nmin, replace = FALSE), ] # Subset
+  balanced <- rbind(temp1,tmp0)
+  rm(temp0,temp1,tmp0)
+  cat("Training RF: \n")
+  
+  mod.rf <- randomForest(TARGET ~., data = mutate(balanced, TARGET = factor(TARGET)),
+                         ntree = 1000, mtry = mtry)
+  
+  pmod3[oos] <- predict(mod.rf, newdata = train0[oos,], type = "prob")[,1]
+}
+
+# Construct the data frame from OOS predictions
+X_oos <- data.frame(pm1 = pmod1, pm2 = pmod2, pm3 = pmod3, TARGET = train0$TARGET)
+#write.csv(X_oos, "X_oos.csv", row.names = FALSE)
+#X_oos <- read.csv("X_oos.csv") # To read later
+
+# --- STAGE 1 COMPLETE --- #
+
+# Now that all models are trained, fit on all 4-folds and then predict on the hold-out
+
+# XGB
+dtrain <- xgb.DMatrix(data = as.matrix(select(train0, -TARGET)),
+                      label = train0$TARGET)
+
+mod.xgb <- xgboost(data = dtrain, params = params, nthread = 8, nrounds = 400,
+                   print.every.n = 10, eval_metric = "auc")
+
+pred.xgb <- predict(mod.xgb, newdata = as.matrix(test0))
+
+# NNET
+mod.nnet <- nnet(TARGET ~., data = mutate(train0, TARGET = factor(TARGET)), 
+                 softmax = FALSE, size = hidden_layer_size, 
+                 MaxNWts = N.weights , maxit = 1000, decay = decay)
+
+pred.nnet <- predict(mod.nnet, newdata = test0)
+
+# RF: balanced set
+nmin <- sum(train0$TARGET == "1"); nmax <- sum(build$TARGET == "0")
+temp0 <- filter(train0, TARGET == "0")
+temp1 <- filter(train0, TARGET == "1")
+
+nfolds <- floor(nmax/nmin)
+rf.folds <- createFolds(1:nmax, k = nfolds) # Create folds for RF fitting
+
+# Initiate matrices for storing predictions
+pred.fold.ho <- matrix(0, nrow = nrow(test0), ncol = nfolds)
+
+for (ifold in 1:nfolds){
+  tr.bal <- rbind(temp1, temp0[rf.folds[[ifold]],])
+  mod.rf <- randomForest(TARGET ~., data = mutate(tr.bal, TARGET = factor(TARGET)),
+                         ntree = 1000, mtry = 38)
+  
+  pred.fold.ho[, ifold] <- predict(mod.rf,newdata = test0, type = "prob")[,1]
+  #
+  cat("Trained RF fold: ", ifold, "\n")
+}
+
+# Compute the avegare on each fold
+pred.rf <- apply(X = pred.fold.ho, MARGIN = 1, FUN = mean)
+
+# Generate the data of predictions on holdout
+X_tst0 <- data.frame(pm1 = pred.xgb, pm2 = as.numeric(pred.nnet), pm3 = pred.rf)
+write.csv(X_tst0, "X_tst0.csv", row.names = FALSE)
+# X_tst0 <- read.csv("X_tst0.csv") # To read later
+
+# Simple logistic regression on the new data
+mod.glm <- glm(TARGET~., data = X_oos, family = "binomial")
+pred.glm <- predict(mod.glm, newdata = X_tst0, type = "response")
+#pred.glm[pred.glm < 0.0] = 0.0 # For some reason we get - values. Replace them with 0
+# Somehow, family = Gaussian works much better!
+
+# pred.glm is to be written in a submission file
+final <- data.frame(ID = test0.id, TARGET = pred.glm)
+write.csv(final,"stacked.csv", row.names = FALSE)
+
+
+# ----- #
+# ----- #
+
