@@ -80,7 +80,7 @@ deskew <- function(x){
 rescale <- function(x) { (x-mean(x))/sd(x) }
 
 # Save locations of numeric columns
-numericCols <- setdiff(names(colClass[colClass == "integer" | colClass == "num"]),c("Id","is.train"))
+numericCols <- setdiff(names(colClass[colClass == "integer" | colClass == "numeric"]),c("Id","is.train"))
 
 # Deskewand standardize numeric columns
 fullData <- fullData %>% mutate_at(.cols=numericCols, funs(deskew)) %>% mutate_at(.cols=numericCols, funs(rescale))

@@ -1,19 +1,21 @@
 # Burak Himmetoglu
-# begin: 08-31-2016
+# begin: 11-13-2016
 #
 # Housing Prices: Simple exploration with XGBoost
 #
 
 # Clean and prepare data
-source("stacking/cleanData.R")
+#source("stacking/cleanData.R")
+#select <- dplyr::select
+source("stacking/cleanDataDetailed.R")
 
 # XGBoost training
 library(xgboost)
 library(caret)
 
 # Grid for model training
-xgb_grid <- expand.grid(eta = 2^seq(-7,-5), colsample_bytree = c(0.2,0.4),
-                        max_depth = c(2,4,8,10), min_child_weight = c(1,2,4), gamma = c(0,0.01,0.1))
+xgb_grid <- expand.grid(eta = 2^seq(-7,-5), colsample_bytree = c(0.2,0.4, 0.6, 0.8),
+                        max_depth = c(2,4,6,8), min_child_weight = c(0,1,2,4), gamma = c(0,0.001,0.01, 0.1))
 
 # xgb style matrices
 dtrain <- xgb.DMatrix(trainSparse, label = outcomes)
@@ -44,34 +46,35 @@ for (ind in 1:dim(xgb_grid)[1]){
                    watchlist=watchlist,
                    nfold=5,
                    early_stopping_rounds = 3)
-  #cv.results[ind,6] <- as.integer(tail(rownames(fit_cv),1)) # Save nrounds
-  #cv.results[ind,7] <- tail(fit_cv$test.rmse.mean,1) # Save rmse
+  
   cv.results[ind,6] <- fit_cv$best_iteration
   cv.results[ind,7] <- fit_cv$evaluation_log[fit_cv$best_iteration][[4]]
   cat("Trained ", ind, " of ", dim(xgb_grid)[1], "\n")
 }
 # Save cv_results
-save(cv.results, file = "xgb_cv.RData")
+save(cv.results, file = "xgb_cv10.RData")
 
 # which parameters yield minimum rmse?
 ind.min <- which.min(cv.results$rmse)
 
-# Reference
-# eta            colsample_bytree   max_depth    min_child_weight gamma  nrounds     rmse
-# 0.015625              0.2            8                1           0.01     811      0.1269202
-
+# Reference (lambda = 1 default, no reomval of outliers beyond GrLivArea)
+# eta          colsample_bytree   max_depth    min_child_weight gamma nrounds     rmse
+# 0.015625              0.4         4                2           0.01     836    0.113743
+##
+#  eta           colsample_bytree  max_depth  min_child_weight gamma nrounds     rmse
+# 0.015625              0.2           4                2         0     914       0.108657
 # Final Model fit
 param <- list(booster="gbtree",
               eval_metric="rmse",
-              eta=cv.results[ind.min,1],
-              colsample_bytree = cv.results[ind.min,2],
-              max_depth = cv.results[ind.min,3],
-              min_child_weight = cv.results[ind.min,4],
-              gamma = cv.results[ind.min,5],
+              eta=0.015625,
+              colsample_bytree = 0.4,
+              max_depth = 4,
+              min_child_weight = 2,
+              gamma = 0.01,
               lambda = 1.0,
               subsample = 0.8)
 
-mod.xgb <- xgboost(data=dtrain, params = param, nrounds=cv.results[ind.min,6])
+mod.xgb <- xgboost(data=dtrain, params = param, nrounds=836)
 
 # Predict on test set
 predTest <- predict(mod.xgb, newdata = dtest)
@@ -79,4 +82,22 @@ Ids <- test$Id # Id numbers
 
 # Data for submission
 submission <- data.frame(Id = Ids, SalePrice = exp(predTest))
-write.csv(submission,"submission.csv",row.names = FALSE)
+write.csv(submission,"submission-xgb.csv",row.names = FALSE)
+
+# Feature importances
+importance <- xgb.importance(feature_names = trainSparse@Dimnames[[2]], model = mod.xgb)
+head(importance,10)
+
+### ---- Explore wrong predictions ---- ####
+
+# Look at training errors
+predTrain <- predict(mod.xgb, newdata = dtrain)
+train <- train %>% mutate(y_actual = outcomes) %>% mutate(y_pred = predTrain) %>% mutate(diff = abs(y_actual-y_pred))
+# Worst ones
+badPreds <- train %>% filter(diff > 0.3) %>% arrange(desc(diff))
+
+# Plot
+gg <- ggplot(train, aes(y_actual, y_pred)) + geom_point(aes(x = y_actual, y = y_pred, color = diff)) + 
+  geom_abline(slope = 1, intercept = 0) + geom_point(data=badPreds, colour="red") + 
+  scale_colour_gradient(limits=c(0, 0.35)) + ggtitle("XGBoost Predictions on Training Set")
+gg
