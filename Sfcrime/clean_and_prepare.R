@@ -10,6 +10,7 @@ library(purrr)
 library(lubridate)
 library(Matrix)
 library(MatrixModels)
+library(caret)
 
 # Load data
 cat("Reading traing and test...\n")
@@ -21,6 +22,14 @@ cat("Feature extraction ...\n")
 train$Descript <- NULL
 train$Resolution <- NULL
 
+# # Resolution
+# # Separate between None & Resolved
+# train <- train %>% mutate(Resolution = as.factor(Resolution))
+# new_resolutions <- rep("RESOLVED", 17)
+# new_resolutions[12] <- "NONE"
+# levels(train$Resolution) <- new_resolutions
+# test$Resolution <- NA
+
 ### Create log ratio columns from address (here, divide train into two...)
 cat("Creating log ratio features from Address...\n")
 
@@ -29,63 +38,85 @@ fill_na <- function(x, default_ratio){
   x
 }
 
-create_ratios <- function(train_in, train_out){
-  # Group by Address & Category
-  df <- train_in %>%
-    mutate(Address = as.factor(Address)) %>%
-    mutate(Category = as.factor(Category)) %>%
-    group_by(Address, Category) %>% count() %>%
-    rename(tot_address_category = n)
+create_ratios_folds <- function(train, nfolds){
+  # Create folds
+  folds <- createFolds(train$Category, k = nfolds)
+  list_out <- list()
   
-  # Group by Address
-  df2 <- train_in %>%
-    mutate(Address = as.factor(Address)) %>%
-    mutate(Category = as.factor(Category)) %>%
-    group_by(Address) %>% count() %>% rename(tot_address = n)
+  for (ifold in 1:length(folds)){
+    train_in <- train[-folds[[ifold]], ]
+    train_ho <- train[folds[[ifold]], ]
+    
+    # Group by Address & Category
+    df <- train_in %>%
+      mutate(Address = as.factor(Address)) %>%
+      mutate(Category = as.factor(Category)) %>%
+      group_by(Address, Category) %>% count() %>%
+      rename(tot_address_category = n)
+    
+    # Group by Address
+    df2 <- train_in %>%
+      mutate(Address = as.factor(Address)) %>%
+      mutate(Category = as.factor(Category)) %>%
+      group_by(Address) %>% count() %>% rename(tot_address = n)
+    
+    # Join and determine the ratio of each Category per Address
+    df3 <- left_join(df, df2, by = "Address")
+    df3 <- df3 %>%
+      mutate(freq = ifelse(tot_address_category >= 5, 1.0 + tot_address_category / tot_address, 1.0))
+    
+    # Now spread the log frequencies to columns
+    df3$tot_address_category <- NULL
+    df3$tot_address <- NULL
+    df4 <- spread(df3, key = Category, value = freq, fill = 1.0)
+    
+    # Collapse the feature names
+    names(df4) <- str_replace_all(names(df4), "( )", "")
+    names(df4) <- str_replace(names(df4), "/", "_")
+    names(df4) <- str_replace(names(df4), "-", "_")
+    
+    # Join df4 with train_out
+    train_ho <- left_join(train_ho,
+                           df4 %>% ungroup(Address) %>% mutate(Address = as.character(Address)),
+                           by = "Address")
+    
+    # Impute NAs with 1.0
+    train_ho <- train_ho %>% mutate_at(names(df4)[-1], fill_na, default_ratio=1.0)
   
-  # Join and determine the ratio of each Category per Address
-  df3 <- left_join(df, df2, by = "Address")
-  df3 <- df3 %>%
-    mutate(freq = ifelse(tot_address_category >= 5, 1.0 + tot_address_category / tot_address, 1.0))
-  
-  # Now spread the log frequencies to columns
-  df3$tot_address_category <- NULL
-  df3$tot_address <- NULL
-  df4 <- spread(df3, key = Category, value = freq, fill = 1.0)
-  
-  # Collapse the feature names
-  names(df4) <- str_replace_all(names(df4), "( )", "")
-  names(df4) <- str_replace(names(df4), "/", "_")
-  names(df4) <- str_replace(names(df4), "-", "_")
-  
-  # Join df4 with train_out
-  train_out <- left_join(train_out,
-                     df4 %>% ungroup(Address) %>% mutate(Address = as.character(Address)),
-                     by = "Address")
-  
-  # Impute NAs with 1.0
-  train_out <- train_out %>% mutate_at(names(df4)[-1], fill_na, default_ratio=1.0)
+    # Add to list
+    list_out[[ifold]] <- train_ho
+  }
   
   # Return train_out
-  train_out
+  bind_rows(list_out)
 }
 
-# Split train into two
-library(caret)
-set.seed(1984)
-idx_split <- createDataPartition(train$Category, p = 0.5)[[1]]
-train_1 <- train[idx_split, ]
-train_2 <- train[-idx_split, ]
+create_ratios_test <- function(train, test){
+  # Features to be created
+  log_feats <- names(train)[8:46]
+  
+  # At each address, the median of the determined Address features
+  df <- train %>% select_(.dots = c(log_feats, "Address")) %>% distinct() %>%
+    group_by(Address) %>% summarise_at(log_feats, median)
+  
+  # Join df4 with train_out
+  test_out <- left_join(test,
+                        df %>% ungroup(Address),
+                        by = "Address")
+  
+  # Impute NAs with 1.0
+  test_out <- test_out %>% mutate_at(log_feats, fill_na, default_ratio=1.0)
+  
+  # Return test_out
+  test_out
+}
 
-# Use create_ratios 
-train_2_new <- create_ratios(train_1, train_2)
-train_1_new <- create_ratios(train_2, train_1)
-rm(train_1, train_2); gc()
+# Create new fetures 5 folds
+train_new <- create_ratios_folds(train, 5)
 
-# Predict ratios on test
-train_new <- bind_rows(train_1_new, train_2_new)
-test_new <- create_ratios(train_new, test)
-rm(train_1_new, train_2_new); gc()
+# Cerate new features in test
+test_new <- create_ratios_test(train_new, test)
+rm(train,test); gc()
 
 # Compute log
 log_feats <- names(train_new)[8:46]
@@ -175,8 +206,8 @@ if (n_clusters > 0){
   mat_K <- model.Matrix(~., as.data.frame(df_K))[,-1]
   
   # Normalize
-  #mat_K <- apply(mat_K, 2, function(x) { (x - median(x)) / max(x) })
-  mat_K <- apply(mat_K, 2, normalize_feat)
+  mat_K <- apply(mat_K, 2, function(x) { (x - median(x)) / max(x) })
+  #mat_K <- apply(mat_K, 2, normalize_feat)
   
   # Compute clusters
   clust_n <- kmeans(mat_K, n_clusters)
@@ -209,9 +240,9 @@ if (n_clusters > 0){
   }
   
   # Remove unnecessary data
-  rm(df_K, mat_K, train, test, clust_n); gc()
+  rm(df_K, mat_K, clust_n); gc()
 }
 
 # Remove unused
-rm(med_table, outs); gc()
+rm(med_table, outs, train_new, test_new); gc()
 cat("Done...\n")
