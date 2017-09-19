@@ -1,2 +1,3 @@
 # kaggle_101
-Some work on Kaggle data for fun
+
+Work on some Kaggle competitions are included in the repo. 
